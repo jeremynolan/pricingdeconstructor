@@ -1,0 +1,459 @@
+from flask import Flask, request, make_response, session
+import pandas as pd
+import plotly.express as px
+import plotly.io as pio
+import os
+import logging
+from datetime import datetime
+import openpyxl
+
+app = Flask(__name__)
+app.secret_key = 'your-secret-key'  # Required for session
+UPLOAD_FOLDER = 'Uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Store pricing rules in memory
+pricing_rules = {
+    "Process": {},
+    "Coating": {},
+    "Foil Material": {},
+    "Foil Thickness": {},
+    "Colour": {}
+}
+
+# Process and Step Process coupling (based on Excel data)
+process_step_mapping = {
+    "Chemetch": ["Single", "Double", "Triple", "None"],
+    "LaserSTEP": ["1 - 2", "1 - 5", "1 - 10", "1 - 15", "1 - 20", "5 or more"],
+    "Milled": ["Single", "Double", "Quad", "5 or more"],
+    "LaserCut": ["None"]
+}
+
+# Inline CSS
+css = """
+<style>
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { color: #333; text-align: center; }
+    .form-group { margin-bottom: 15px; }
+    label { display: inline-block; width: 200px; font-weight: bold; }
+    input[type="file"], input[type="number"] { padding: 5px; width: 200px; }
+    button { padding: 10px 20px; background-color: #007bff; color: white; border: none; cursor: pointer; }
+    button:hover { background-color: #0056b3; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background-color: #007bff; color: white; }
+    tr:nth-child(even) { background-color: #f2f2f2; }
+    .error { color: red; text-align: center; }
+    .debug { color: blue; text-align: left; }
+    .download { display: inline-block; margin-top: 20px; margin-right: 10px; padding: 10px 20px; background-color: #28a745; color: white; text-decoration: none; }
+    .download:hover { background-color: #218838; }
+    .download-excel { background-color: #17a2b8; }
+    .download-excel:hover { background-color: #138496; }
+    #chart { margin-top: 20px; }
+</style>
+"""
+
+# Upload page HTML
+upload_html = f"""
+<!DOCTYPE html>
+<html>
+<head><title>Price Deconstructor</title>{css}</head>
+<body>
+    <div class="container">
+        <h1>Upload Sales Report</h1>
+        {{error|safe}}
+        <form method="post" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="file">Select Excel File (.xlsx):</label>
+                <input type="file" id="file" name="file" accept=".xlsx">
+            </div>
+            <button type="submit">Upload & Proceed to Pricing</button>
+        </form>
+        <p><a href="/debug">View Debug Info</a></p>
+    </div>
+</body>
+</html>
+"""
+
+# Pricing form HTML
+pricing_form_html = f"""
+<!DOCTYPE html>
+<html>
+<head><title>Pricing Rules</title>{css}</head>
+<body>
+    <div class="container">
+        <h1>Enter Pricing Rules</h1>
+        {{error|safe}}
+        <form method="post" action="/pricing">
+            <h3>Process and Step Process</h3>
+            <p>{{{{processes|length}}}} Processes Available</p>
+            {{% for process in processes %}}
+            <div class="form-group">
+                <h4>{{{{process}}}}</h4>
+                <p>{{{{process_step_mapping[process]|length}}}} Steps for {{{{process}}}}</p>
+                {{% for step in process_step_mapping[process] %}}
+                <div class="form-group">
+                    <label for="{{{{process}}}}_{{{{step}}}}">{{{{step}}}}</label>
+                    <input type="number" step="0.01" id="{{{{process}}}}_{{{{step}}}}" name="{{{{process}}}}_{{{{step}}}}" placeholder="Cost ($)">
+                </div>
+                {{% endfor %}}
+            </div>
+            {{% endfor %}}
+            <h3>Coating</h3>
+            <p>{{{{['None', 'Advanced Nano', 'Nano Wipe', 'Nano Slic', 'BluPrint']|length}}}} Coatings Available</p>
+            {{% for coating in ['None', 'Advanced Nano', 'Nano Wipe', 'Nano Slic', 'BluPrint'] %}}
+            <div class="form-group">
+                <label for="Coating_{{{{coating}}}}">{{{{coating}}}}</label>
+                <input type="number" step="0.01" id="Coating_{{{{coating}}}}" name="Coating_{{{{coating}}}}" placeholder="Cost ($)">
+            </div>
+            {{% endfor %}}
+            <button type="submit">Process File</button>
+        </form>
+        <p><a href="/debug">View Debug Info</a></p>
+    </div>
+</body>
+</html>
+"""
+
+# Results page HTML
+results_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Results</title>
+    {css}
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Deconstructed Pricing</h1>
+        <p>{{{{data|length}}}} Unique Customers Processed</p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Customer</th>
+                    <th>Frame</th>
+                    <th>Sales Price</th>
+                    <th>Process</th>
+                    <th>Step Process</th>
+                    <th>Coating</th>
+                    <th>Foil Material</th>
+                    <th>Foil Thickness</th>
+                    <th>Colour</th>
+                    <th>Attribute Cost</th>
+                    <th>Base Cost</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{% for row in data %}}
+                <tr>
+                    <td>{{{{row.Customer}}}}</td>
+                    <td>{{{{row.Frame}}}}</td>
+                    <td>{{{{row.Sales_Price}}}}</td>
+                    <td>{{{{row.Process}}}}</td>
+                    <td>{{{{row.Step_Process}}}}</td>
+                    <td>{{{{row.Coating}}}}</td>
+                    <td>{{{{row.Foil_Material}}}}</td>
+                    <td>{{{{row.Foil_Thickness}}}}</td>
+                    <td>{{{{row.Colour}}}}</td>
+                    <td>{{{{row.Attribute_Cost}}}}</td>
+                    <td>{{{{row.Base_Cost}}}}</td>
+                </tr>
+                {{% endfor %}}
+            </tbody>
+        </table>
+        <h3>Lowest Base Cost by Customer</h3>
+        <div id="chart">{{{{chart|safe}}}}</div>
+        <a href="/download" class="download">Download Results as CSV</a>
+        <a href="/download_excel" class="download download-excel">Download Results as Excel</a>
+        <p><a href="/debug">View Debug Info</a></p>
+    </div>
+</body>
+</html>
+"""
+
+# Debug page HTML
+debug_html = f"""
+<!DOCTYPE html>
+<html>
+<head><title>Debug Info</title>{css}</head>
+<body>
+    <div class="container">
+        <h1>Debug Information</h1>
+        <p class="debug">Timestamp: {{{{timestamp}}}}</p>
+        <p class="debug">Session File Path: {{{{file_path}}}}</p>
+        <p class="debug">File Exists: {{{{file_exists}}}}</p>
+        <p class="debug">Uploads Folder Contents: {{{{uploads_contents}}}}</p>
+        <p class="debug">Sheet Names: {{{{sheet_names}}}}</p>
+        <p class="debug">Column Names: {{{{column_names}}}}</p>
+        <p><a href="/">Back to Upload</a></p>
+    </div>
+</body>
+</html>
+"""
+
+@app.route('/debug')
+def debug_info():
+    file_path = session.get('file_path', 'None')
+    file_exists = os.path.exists(file_path) if file_path != 'None' else False
+    uploads_contents = os.listdir(UPLOAD_FOLDER)
+    sheet_names = 'None'
+    column_names = 'None'
+    if file_exists:
+        try:
+            wb = openpyxl.load_workbook(file_path)
+            sheet_names = ', '.join(wb.sheetnames)
+            logger.debug(f"Sheet names in {file_path}: {sheet_names}")
+            if 'SalesbyItemBASEPRICEDECON' in wb.sheetnames:
+                df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
+                column_names = ', '.join(df.columns)
+                logger.debug(f"Column names in {file_path}: {column_names}")
+            else:
+                column_names = 'Sheet not found'
+        except Exception as e:
+            sheet_names = f'Error reading sheets: {str(e)}'
+            column_names = 'N/A'
+            logger.error(f"Error reading sheet names or columns: {str(e)}")
+    return app.jinja_env.from_string(debug_html).render(
+        timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        file_path=file_path,
+        file_exists=file_exists,
+        uploads_contents=', '.join(uploads_contents) if uploads_contents else 'Empty',
+        sheet_names=sheet_names,
+        column_names=column_names
+    )
+
+@app.route('/', methods=['GET', 'POST'])
+def upload_file():
+    logger.debug("Entering / route")
+    if request.method == 'POST':
+        logger.debug("Received POST request for file upload")
+        file = request.files.get('file')
+        if not file:
+            logger.error("No file provided in upload")
+            return app.jinja_env.from_string(upload_html).render(error='<p class="error">No file selected. Please choose a file.</p>')
+        
+        if not file.filename.endswith('.xlsx'):
+            logger.error(f"Invalid file extension: {file.filename}")
+            return app.jinja_env.from_string(upload_html).render(error='<p class="error">Please upload a valid .xlsx file.</p>')
+        
+        # Clear previous files in uploads folder
+        for old_file in os.listdir(UPLOAD_FOLDER):
+            try:
+                os.remove(os.path.join(UPLOAD_FOLDER, old_file))
+                logger.debug(f"Removed old file: {old_file}")
+            except Exception as e:
+                logger.warning(f"Failed to remove old file {old_file}: {str(e)}")
+        
+        file_path = os.path.normpath(os.path.join(UPLOAD_FOLDER, file.filename))
+        try:
+            logger.debug(f"Saving file: {file_path}")
+            file.save(file_path)
+            session['file_path'] = file_path
+            logger.debug(f"File uploaded and saved: {file_path}")
+        except Exception as e:
+            logger.error(f"Error saving file {file_path}: {str(e)}")
+            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error saving file: {str(e)}</p>')
+        
+        # Validate file structure
+        try:
+            logger.debug(f"Validating Excel file structure: {file_path}")
+            wb = openpyxl.load_workbook(file_path)
+            sheet_names = wb.sheetnames
+            logger.debug(f"Sheet names: {sheet_names}")
+            if 'SalesbyItemBASEPRICEDECON' not in sheet_names:
+                logger.error(f"Sheet 'SalesbyItemBASEPRICEDECON' not found in {file_path}")
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Sheet "SalesbyItemBASEPRICEDECON" not found. Available sheets: {", ".join(sheet_names)}</p>')
+            
+            df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
+            required_columns = ['Sales Price', 'Frame', 'Customer/Project: Company Name', 'Process', '[ES] Step Process', 'Coating', 'Foil Material', 'Foil Thickness', 'Colour']
+            actual_columns = [col.strip().lower() for col in df.columns]  # Normalize column names
+            required_columns_normalized = [col.strip().lower() for col in required_columns]
+            missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
+            if missing_columns:
+                logger.error(f"Missing columns in Excel file: {missing_columns}")
+                logger.debug(f"Actual columns: {', '.join(df.columns)}")
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Missing columns in Excel file: {", ".join(missing_columns)}. Found: {", ".join(df.columns)}</p>')
+            
+            logger.debug("Excel file validated successfully")
+            return app.jinja_env.from_string(pricing_form_html).render(
+                processes=process_step_mapping.keys(),
+                process_step_mapping=process_step_mapping,
+                error=None
+            )
+        except Exception as e:
+            logger.error(f"Error validating Excel file: {str(e)}")
+            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error validating Excel file: {str(e)}</p>')
+    
+    logger.debug("Rendering upload page for GET request")
+    return app.jinja_env.from_string(upload_html).render(error=None)
+
+@app.route('/pricing', methods=['GET', 'POST'])
+def pricing_form():
+    if request.method == 'GET':
+        logger.debug("Accessed /pricing via GET, redirecting to upload page")
+        return app.jinja_env.from_string(upload_html).render(error='<p class="error">Please upload a file first.</p>')
+    
+    logger.debug("Processing pricing form submission")
+    
+    global pricing_rules
+    pricing_rules = {
+        "Process": {},
+        "Coating": {},
+        "Foil Material": {},
+        "Foil Thickness": {},
+        "Colour": {}
+    }
+    
+    # Process form data
+    try:
+        for process in process_step_mapping:
+            pricing_rules["Process"][process] = {}
+            for step in process_step_mapping[process]:
+                cost = request.form.get(f"{process}_{step}", "0")
+                try:
+                    pricing_rules["Process"][process][step] = float(cost) if cost.strip() else 0
+                    logger.debug(f"Set price for {process}_{step}: {pricing_rules['Process'][process][step]}")
+                except ValueError:
+                    logger.warning(f"Invalid cost value for {process}_{step}: {cost}")
+                    pricing_rules["Process"][process][step] = 0
+        
+        for coating in ["None", "Advanced Nano", "Nano Wipe", "Nano Slic", "BluPrint"]:
+            cost = request.form.get(f"Coating_{coating}", "0")
+            try:
+                pricing_rules["Coating"][coating] = float(cost) if cost.strip() else 0
+                logger.debug(f"Set price for Coating_{coating}: {pricing_rules['Coating'][coating]}")
+            except ValueError:
+                logger.warning(f"Invalid cost value for Coating_{coating}: {cost}")
+                pricing_rules["Coating"][coating] = 0
+    except Exception as e:
+        logger.error(f"Error processing form data: {str(e)}")
+        return app.jinja_env.from_string(pricing_form_html).render(
+            processes=process_step_mapping.keys(),
+            process_step_mapping=process_step_mapping,
+            error=f'<p class="error">Error processing pricing form: {str(e)}</p>'
+        )
+    
+    # Process uploaded Excel file
+    file_path = session.get('file_path')
+    if not file_path or not os.path.exists(file_path):
+        logger.error(f"No valid file found in session or on disk: {file_path}")
+        return app.jinja_env.from_string(upload_html).render(error='<p class="error">No valid file found. Please upload again.</p>')
+    
+    try:
+        logger.debug(f"Attempting to read Excel file: {file_path}")
+        df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl')
+        logger.debug(f"Excel file read successfully: {file_path}, {len(df)} rows")
+    except Exception as e:
+        logger.error(f"Error reading Excel file: {str(e)}")
+        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error reading Excel file: {str(e)}</p>')
+    
+    results = []
+    try:
+        for _, row in df.iterrows():
+            if pd.isna(row['Sales Price']) or pd.isna(row['Frame']) or pd.isna(row['Customer/Project: Company Name']):
+                continue
+            
+            process = row['Process']
+            step_process = row['[ES] Step Process']
+            coating = row['Coating']
+            foil_material = row['Foil Material']
+            foil_thickness = row['Foil Thickness']
+            colour = row['Colour']
+            customer = row['Customer/Project: Company Name']
+            
+            attribute_cost = 0
+            if process != 'LaserCut':
+                if process in pricing_rules["Process"] and step_process in pricing_rules["Process"][process]:
+                    attribute_cost += pricing_rules["Process"][process][step_process]
+                else:
+                    logger.warning(f"Invalid process/step_process combination: {process}/{step_process}")
+                if coating in pricing_rules["Coating"]:
+                    attribute_cost += pricing_rules["Coating"][coating]
+                else:
+                    logger.warning(f"Invalid coating: {coating}")
+            
+            base_cost = row['Sales Price'] - attribute_cost
+            
+            results.append({
+                'Customer': customer,
+                'Frame': row['Frame'],
+                'Sales_Price': row['Sales Price'],
+                'Process': process,
+                'Step_Process': step_process,
+                'Coating': coating,
+                'Foil_Material': foil_material,
+                'Foil_Thickness': foil_thickness,
+                'Colour': colour,
+                'Attribute_Cost': attribute_cost,
+                'Base_Cost': base_cost
+            })
+    except Exception as e:
+        logger.error(f"Error processing Excel data: {str(e)}")
+        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error processing Excel data: {str(e)}</p>')
+    
+    # Remove duplicates by customer, keeping row with lowest Base Cost
+    try:
+        result_df = pd.DataFrame(results)
+        logger.debug(f"Processed {len(result_df)} rows before duplicate removal")
+        result_df = result_df.loc[result_df.groupby('Customer')['Base_Cost'].idxmin()].reset_index(drop=True)
+        logger.debug(f"After duplicate removal: {len(result_df)} unique customers")
+    except Exception as e:
+        logger.error(f"Error processing results: {str(e)}")
+        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error processing results: {str(e)}</p>')
+    
+    # Generate bar chart for lowest Base Cost by Customer
+    try:
+        fig = px.bar(result_df, x='Customer', y='Base_Cost', title='Lowest Base Cost by Customer',
+                     labels={'Base_Cost': 'Base Cost ($)', 'Customer': 'Customer'})
+        fig.update_layout(xaxis_tickangle=45)
+        chart_html = pio.to_html(fig, full_html=False)
+        logger.debug("Bar chart generated successfully")
+    except Exception as e:
+        logger.error(f"Error generating chart: {str(e)}")
+        chart_html = '<p class="error">Error generating chart</p>'
+    
+    # Save results to CSV and Excel
+    csv_path = os.path.join(UPLOAD_FOLDER, 'results.csv')
+    excel_path = os.path.join(UPLOAD_FOLDER, 'results.xlsx')
+    try:
+        result_df.to_csv(csv_path, index=False)
+        result_df.to_excel(excel_path, index=False, engine='openpyxl')
+        logger.debug(f"Results saved to {csv_path} and {excel_path}")
+    except Exception as e:
+        logger.error(f"Error saving results: {str(e)}")
+        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error saving results: {str(e)}</p>')
+    
+    return app.jinja_env.from_string(results_html).render(data=result_df.to_dict('records'), chart=chart_html)
+
+@app.route('/download')
+def download_csv():
+    result_path = os.path.join(UPLOAD_FOLDER, 'results.csv')
+    if os.path.exists(result_path):
+        response = make_response(open(result_path, 'rb').read())
+        response.headers['Content-Disposition'] = 'attachment; filename=results.csv'
+        response.mimetype = 'text/csv'
+        logger.debug(f"Serving CSV download: {result_path}")
+        return response
+    logger.error("CSV file not found for download")
+    return app.jinja_env.from_string(upload_html).render(error='<p class="error">No results available for download.</p>')
+
+@app.route('/download_excel')
+def download_excel():
+    result_path = os.path.join(UPLOAD_FOLDER, 'results.xlsx')
+    if os.path.exists(result_path):
+        response = make_response(open(result_path, 'rb').read())
+        response.headers['Content-Disposition'] = 'attachment; filename=results.xlsx'
+        response.mimetype = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        logger.debug(f"Serving Excel download: {result_path}")
+        return response
+    logger.error("Excel file not found for download")
+    return app.jinja_env.from_string(upload_html).render(error='<p class="error">No results available for download.</p>')
+
+if __name__ == '__main__':
+    app.run(debug=True)

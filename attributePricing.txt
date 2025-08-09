@@ -1,0 +1,21 @@
+chem single: 175
+chem double: 175
+chem triple: 175
+chem 5 or more: 175
+lasterstep 1-2: 95
+laserstep 1-5: 125
+laststep 1-10: 175
+laserstep 1-15: 225
+laserstep 1-20: 245
+laserstep 21-30:255
+laserstep 31-40:355
+laserstep 41-50: 455
+laserstep 51-60: 555
+mill single: 150
+mill double: 175
+mill triple: 225
+mill quad: 300
+coat advanced nano: 163
+coat nano wipe: 40
+coat nano slic: 163
+coat bluprint: 1500

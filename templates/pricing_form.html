@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pricing Rules</title>
+    <link rel="stylesheet" href="/static/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Enter Pricing Rules</h1>
+        <form method="post" action="/pricing">
+            <h3>Process and Step Process</h3>
+            {% for process in processes %}
+            <div class="mb-3">
+                <h4>{{ process }}</h4>
+                {% for step in process_step_mapping[process] %}
+                <div class="row mb-2">
+                    <div class="col-md-4">
+                        <label for="{{ process }}_{{ step }}" class="form-label">{{ step }}</label>
+                    </div>
+                    <div class="col-md-4">
+                        <input type="number" step="0.01" class="form-control" id="{{ process }}_{{ step }}" name="{{ process }}_{{ step }}" placeholder="Cost ($)">
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+            
+            <h3>Coating</h3>
+            {% for coating in ['None', 'Advanced Nano', 'Nano Wipe', 'Nano Slic', 'BluPrint'] %}
+            <div class="row mb-2">
+                <div class="col-md-4">
+                    <label for="Coating_{{ coating }}" class="form-label">{{ coating }}</label>
+                </div>
+                <div class="col-md-4">
+                    <input type="number" step="0.01" class="form-control" id="Coating_{{ coating }}" name="Coating_{{ coating }}" placeholder="Cost ($)">
+                </div>
+            </div>
+            {% endfor %}
+            
+            <!-- Add similar sections for Foil Material, Foil Thickness, Colour if needed -->
+            
+            <button type="submit" class="btn btn-primary">Process File</button>
+        </form>
+    </div>
+</body>
+</html>
