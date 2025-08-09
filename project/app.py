@@ -1,4 +1,4 @@
-from flask import Flask, request, make_response, session
+from flask import Flask, request, make_response
 from flask_session import Session
 import pandas as pd
 import plotly.express as px
@@ -18,7 +18,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(16))
 app.config['SESSION_TYPE'] = 'redis'
 app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = False  # Debugging: Set to True in production
@@ -48,7 +48,7 @@ except redis.ConnectionError as e:
     os.makedirs('/tmp/flask_session', exist_ok=True)
     Session(app)
 
-# Logging: WARNING for non-critical, INFO for key operations, DEBUG for session/Redis
+# Logging: WARNING to minimize L11 errors, INFO for key ops, DEBUG for session/Redis
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ css = """
 </style>
 """
 
-# Upload page HTML (combined Excel and pricing file upload)
+# Upload page HTML
 upload_html = """
 <!DOCTYPE html>
 <html>
@@ -125,7 +125,7 @@ upload_html = """
 </html>
 """
 
-# Pricing form HTML (includes Excel re-upload)
+# Pricing form HTML (requires Excel re-upload)
 pricing_form_html = """
 <!DOCTYPE html>
 <html>
@@ -135,7 +135,7 @@ pricing_form_html = """
 <body>
     <div class="container">
         <h1>Enter Pricing Rules</h1>
-        <p>Enter prices manually or use uploaded pricing file values.</p>
+        <p>Enter prices manually or use uploaded pricing file values. Re-upload Excel file to ensure processing.</p>
         {{error|safe}}
         <form method="post" action="/pricing" enctype="multipart/form-data">
             <div class="form-group">
@@ -238,13 +238,10 @@ debug_html = """
     <div class="container">
         <h1>Debug Information</h1>
         <p class="debug">Timestamp: {{timestamp}}</p>
-        <p class="debug">Session File Path: {{file_path}}</p>
-        <p class="debug">File Exists: {{file_exists}}</p>
         <p class="debug">Uploads Folder Contents: {{uploads_contents}}</p>
         <p class="debug">Sheet Names: {{sheet_names}}</p>
         <p class="debug">Column Names: {{column_names}}</p>
         <p class="debug">Form Data: {{form_data}}</p>
-        <p class="debug">Session Data: {{session_data}}</p>
         <p class="debug">Redis Status: {{redis_status}}</p>
         <p><a href="/">Back to Upload</a> | <a href="/test_redis">Test Redis</a></p>
     </div>
@@ -265,13 +262,10 @@ def test_redis():
 
 @app.route('/debug')
 def debug_info():
-    file_path = session.get('file_path', 'None')
-    file_exists = os.path.exists(file_path) if file_path != 'None' else False
     uploads_contents = os.listdir(UPLOAD_FOLDER)
     sheet_names = 'None'
     column_names = 'None'
-    form_data = session.get('form_data', 'None')
-    session_data = dict(session)
+    form_data = 'None'
     redis_status = 'Unknown'
     try:
         redis_client = app.config['SESSION_REDIS']
@@ -279,15 +273,17 @@ def debug_info():
         redis_status = 'Connected'
     except redis.ConnectionError as e:
         redis_status = f'Failed: {str(e)}'
-    if file_exists:
+    # Use a sample file for sheet/column info if available
+    sample_file = next((os.path.join(UPLOAD_FOLDER, f) for f in uploads_contents if f.endswith('.xlsx')), None)
+    if sample_file:
         try:
-            wb = openpyxl.load_workbook(file_path)
+            wb = openpyxl.load_workbook(sample_file)
             sheet_names = ', '.join(wb.sheetnames)
-            logger.info(f"Sheet names in {file_path}: {sheet_names}")
+            logger.info(f"Sheet names in {sample_file}: {sheet_names}")
             if 'SalesbyItemBASEPRICEDECON' in wb.sheetnames:
-                df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
+                df = pd.read_excel(sample_file, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
                 column_names = ', '.join(str(col) for col in df.columns)
-                logger.info(f"Column names in {file_path}: {column_names}")
+                logger.info(f"Column names in {sample_file}: {column_names}")
             else:
                 column_names = 'Sheet not found'
         except Exception as e:
@@ -296,13 +292,10 @@ def debug_info():
             logger.error(f"Error reading sheet names or columns: {str(e)}")
     return app.jinja_env.from_string(debug_html).render(
         timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        file_path=file_path,
-        file_exists=file_exists,
         uploads_contents=', '.join(uploads_contents) if uploads_contents else 'Empty',
         sheet_names=sheet_names,
         column_names=column_names,
         form_data=form_data,
-        session_data=session_data,
         redis_status=redis_status
     )
 
@@ -340,10 +333,13 @@ def upload_file():
                 return app.jinja_env.from_string(upload_html).render(error='<p class="error">Server error: No write permissions for Uploads folder.</p>')
             
             excel_file.save(file_path)
+            # Uncomment for S3
+            # s3 = boto3.client('s3', aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'), aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'))
+            # s3.upload_file(file_path, 'your-bucket', os.path.basename(file_path))
             
             if not os.path.exists(file_path):
                 logger.error(f"Excel file not found after saving: {file_path}")
-                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Failed to save file: {excel_file.filename}. Please try again.</p>')
+                return app.jinja_env.from_string(upload_html).render(error='<p class="error">Failed to save file: {excel_file.filename}. Please try again.</p>')
             
             file_stats = os.stat(file_path)
             logger.debug(f"File permissions for {file_path}: {oct(file_stats.st_mode)[-3:]}")
@@ -369,17 +365,10 @@ def upload_file():
             required_columns_normalized = [col.strip().lower() for col in required_columns]
             missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
             if missing_columns:
-                session['column_warning'] = f"Missing columns in {excel_file.filename}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
-            else:
-                session['column_warning'] = None
-                logger.debug("Excel file validated successfully")
+                logger.error(f"Missing columns in Excel file: {missing_columns}")
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Missing columns in {excel_file.filename}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}</p>')
             
-            # Store file path in session
-            session.permanent = True
-            session['file_path'] = file_path
-            session['upload_timestamp'] = datetime.now().isoformat()
-            session['test_key'] = 'test_value'
-            logger.debug(f"Session set in / route: {dict(session)}")
+            logger.info("Excel file validated successfully")
             
             # Handle pricing file if provided
             form_data = {}
@@ -392,18 +381,18 @@ def upload_file():
                     
                     if not os.path.exists(pricing_file_path):
                         logger.error(f"Pricing file not found after saving: {pricing_file_path}")
-                        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Failed to save pricing file: {pricing_file.filename}. Please try again.</p>')
+                        return app.jinja_env.from_string(upload_html).render(error='<p class="error">Failed to save pricing file: {pricing_file.filename}. Please try again.</p>')
                     
                     with open(pricing_file_path, 'r') as f:
                         for line in f:
                             line = line.strip()
                             if not re.match(r'^\w+\s*.*?:\s*\d+(\.\d+)?$', line):
-                                continue  # Suppress warning logs
+                                continue
                             key, value = [part.strip() for part in line.split(':', 1)]
                             try:
                                 value = float(value)
                             except ValueError:
-                                continue  # Suppress warning logs
+                                continue
                             
                             key = key.lower().replace('lasterstep', 'laserstep').replace('laststep', 'laserstep')
                             if key.startswith('chem '):
@@ -445,6 +434,12 @@ def upload_file():
                     logger.error(f"Error processing pricing file: {str(e)}")
                     return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error processing pricing file: {pricing_file.filename}. Please try again.</p>')
             
+            try:
+                os.remove(file_path)
+                logger.debug(f"Removed Excel file after validation: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove Excel file {file_path}: {str(e)}")
+            
             return app.jinja_env.from_string(pricing_form_html).render(
                 processes=process_step_mapping.keys(),
                 process_step_mapping=process_step_mapping,
@@ -460,7 +455,7 @@ def upload_file():
 
 @app.route('/pricing', methods=['GET', 'POST'])
 def pricing_form():
-    logger.debug(f"Session at /pricing start: {dict(session)}")
+    logger.debug("Entering /pricing route")
     if request.method == 'GET':
         logger.debug("Accessed /pricing via GET, redirecting to upload")
         return app.jinja_env.from_string(upload_html).render(error='<p class="error">Please upload an Excel file first.</p>')
@@ -512,6 +507,9 @@ def pricing_form():
             )
         
         excel_file.save(file_path)
+        # Uncomment for S3
+        # s3 = boto3.client('s3', aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'), aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'))
+        # s3.upload_file(file_path, 'your-bucket', os.path.basename(file_path))
         
         if not os.path.exists(file_path):
             logger.error(f"Excel file not found after saving: {file_path}")
@@ -519,12 +517,11 @@ def pricing_form():
                 processes=process_step_mapping.keys(),
                 process_step_mapping=process_step_mapping,
                 form_data={},
-                error=f'<p class="error">Failed to save Excel file: {excel_file.filename}. Please try again.</p>'
+                error='<p class="error">Failed to save Excel file: {excel_file.filename}. Please try again.</p>'
             )
         
         # Process form data
         form_data = {key: value for key, value in request.form.items()}
-        session['form_data'] = str(form_data)[:1000]
         logger.debug(f"Form data received: {form_data}")
         non_zero_prices = False
         for process in process_step_mapping:
@@ -557,7 +554,7 @@ def pricing_form():
         logger.debug(f"Final pricing_rules: {pricing_rules}")
         
         if not non_zero_prices:
-            logger.warning("No non-zero pricing rules provided")
+            logger.error("No non-zero pricing rules provided")
             return app.jinja_env.from_string(pricing_form_html).render(
                 processes=process_step_mapping.keys(),
                 process_step_mapping=process_step_mapping,
@@ -586,7 +583,7 @@ def pricing_form():
             processes=process_step_mapping.keys(),
             process_step_mapping=process_step_mapping,
             form_data=form_data,
-            error=f'<p class="error">No read permissions for file: {os.path.basename(file_path)}. Please upload again.</p>'
+            error='<p class="error">No read permissions for file: {os.path.basename(file_path)}. Please upload again.</p>'
         )
     
     try:
@@ -604,20 +601,17 @@ def pricing_form():
         
         # Process Excel in chunks for large files
         results = []
-        chunk_size = 1000  # Adjust based on dyno memory
+        chunk_size = 5000  # Increased for better performance
         for chunk in pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', chunksize=chunk_size):
             logger.info(f"Processing chunk with {len(chunk)} rows")
             for index, row in chunk.iterrows():
                 try:
                     if pd.isna(row['Sales Price']) or pd.isna(row['Frame']) or pd.isna(row['Customer/Project: Company Name']):
-                        logger.debug(f"Skipping row {index} due to missing required fields")
                         continue
-                    
                     process = str(row['Process']).strip() if not pd.isna(row['Process']) else 'Unknown'
                     step_process = str(row['Step Process']).strip() if not pd.isna(row['Step Process']) else 'None'
                     if process == 'LaserSTEP':
                         step_process = re.sub(r'\s*-\s*', '-', step_process)
-                        logger.debug(f"Normalized step_process for LaserSTEP: {step_process}")
                     coating = str(row['Coating']).strip() if not pd.isna(row['Coating']) else 'None'
                     foil_material = str(row['Foil Material']).strip() if not pd.isna(row['Foil Material']) else 'Unknown'
                     foil_thickness = str(row['Foil Thickness']).strip() if not pd.isna(row['Foil Thickness']) else 'Unknown'
@@ -631,14 +625,10 @@ def pricing_form():
                     
                     attribute_cost = 0
                     if process != 'LaserCut':
-                        if process in pricing_rules["Process"]:
-                            logger.debug(f"Available steps for {process}: {list(pricing_rules['Process'][process].keys())}")
-                            if step_process in pricing_rules["Process"][process]:
-                                attribute_cost += pricing_rules["Process"][process][step_process]
-                                logger.debug(f"Applied process cost: {process}_{step_process} = {pricing_rules['Process'][process][step_process]}")
+                        if process in pricing_rules["Process"] and step_process in pricing_rules["Process"][process]:
+                            attribute_cost += pricing_rules["Process"][process][step_process]
                         if coating in pricing_rules["Coating"]:
                             attribute_cost += pricing_rules["Coating"][coating]
-                            logger.debug(f"Applied coating cost: Coating_{coating} = {pricing_rules['Coating'][coating]}")
                     
                     base_cost = sales_price - attribute_cost
                     
@@ -736,15 +726,6 @@ def pricing_form():
             logger.debug(f"Removed uploaded Excel file: {file_path}")
         except Exception as e:
             logger.warning(f"Failed to remove Excel file {file_path}: {str(e)}")
-        
-        column_warning = session.get('column_warning')
-        if column_warning:
-            logger.info(f"Rendering results with warning: {column_warning}")
-            return app.jinja_env.from_string(results_html).render(
-                data=result_df.to_dict('records'),
-                chart=chart_html,
-                error=f'<p class="error">Warning: {column_warning}</p>'
-            )
         
         logger.info("Rendering results page")
         return app.jinja_env.from_string(results_html).render(data=result_df.to_dict('records'), chart=chart_html)
