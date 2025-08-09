@@ -38,7 +38,7 @@ try:
     )
     redis_client.ping()
     app.config['SESSION_REDIS'] = redis_client
-    logger.debug("Redis connection established successfully")
+    logger.info("Redis connection established successfully")
     Session(app)
 except redis.ConnectionError as e:
     logger.error(f"Redis connection failed: {str(e)}, falling back to filesystem")
@@ -47,8 +47,8 @@ except redis.ConnectionError as e:
     os.makedirs('/tmp/flask_session', exist_ok=True)
     Session(app)
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging (reduced to INFO to prevent L11 buffer overflow)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Store pricing rules in memory
@@ -93,7 +93,7 @@ css = """
 </style>
 """
 
-# Upload page HTML
+# Upload page HTML (combined Excel and pricing file upload)
 upload_html = """
 <!DOCTYPE html>
 <html>
@@ -104,12 +104,17 @@ upload_html = """
     <div class="container">
         <h1>Upload Sales Report</h1>
         <p>Ensure your Excel file has the sheet "SalesbyItemBASEPRICEDECON" with columns: Sales Price, Frame, Customer/Project: Company Name, Process, Step Process, Coating, Foil Material, Foil Thickness, Colour.</p>
+        <p>Pricing file (optional) format: <code>chem Single: 100</code>, <code>laserstep 1-2: 200</code>, <code>coat Advanced Nano: 50</code>.</p>
         <p>Session expires after 24 hours of inactivity.</p>
         {{error|safe}}
         <form method="post" enctype="multipart/form-data">
             <div class="form-group">
-                <label for="file">Select Excel File (.xlsx):</label>
-                <input type="file" id="file" name="file" accept=".xlsx">
+                <label for="excel_file">Select Excel File (.xlsx):</label>
+                <input type="file" id="excel_file" name="excel_file" accept=".xlsx" required>
+            </div>
+            <div class="form-group">
+                <label for="pricing_file">Select Pricing File (.txt, optional):</label>
+                <input type="file" id="pricing_file" name="pricing_file" accept=".txt">
             </div>
             <button type="submit">Upload & Proceed to Pricing</button>
         </form>
@@ -129,13 +134,9 @@ pricing_form_html = """
 <body>
     <div class="container">
         <h1>Enter Pricing Rules</h1>
-        <p>Upload a .txt file or enter prices manually. File format example: <code>chem Single: 100</code>, <code>laserstep 1-2: 200</code>, <code>coat Advanced Nano: 50</code>.</p>
+        <p>Enter prices manually or use uploaded pricing file values.</p>
         {{error|safe}}
         <form method="post" action="/pricing" enctype="multipart/form-data">
-            <div class="form-group">
-                <label for="pricing_file">Import Pricing File (.txt):</label>
-                <input type="file" id="pricing_file" name="pricing_file" accept=".txt">
-            </div>
             <h3>Process and Step Process</h3>
             {% for process in processes %}
             <div class="form-group">
@@ -251,7 +252,7 @@ def test_redis():
     try:
         redis_client = app.config['SESSION_REDIS']
         redis_client.ping()
-        logger.debug("Redis ping successful")
+        logger.info("Redis ping successful")
         return "Redis connection successful"
     except redis.ConnectionError as e:
         logger.error(f"Redis ping failed: {str(e)}")
@@ -265,7 +266,7 @@ def debug_info():
     sheet_names = 'None'
     column_names = 'None'
     form_data = session.get('form_data', 'None')
-    session_data = dict(session)  # Get all session data
+    session_data = dict(session)
     redis_status = 'Unknown'
     try:
         redis_client = app.config['SESSION_REDIS']
@@ -277,11 +278,11 @@ def debug_info():
         try:
             wb = openpyxl.load_workbook(file_path)
             sheet_names = ', '.join(wb.sheetnames)
-            logger.debug(f"Sheet names in {file_path}: {sheet_names}")
+            logger.info(f"Sheet names in {file_path}: {sheet_names}")
             if 'SalesbyItemBASEPRICEDECON' in wb.sheetnames:
                 df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
                 column_names = ', '.join(str(col) for col in df.columns)
-                logger.debug(f"Column names in {file_path}: {column_names}")
+                logger.info(f"Column names in {file_path}: {column_names}")
             else:
                 column_names = 'Sheet not found'
         except Exception as e:
@@ -313,52 +314,49 @@ def upload_file():
     if request.method == 'POST':
         logger.debug("Received POST request for file upload")
         try:
-            file = request.files.get('file')
-            if not file:
-                logger.error("No file provided in upload")
-                return app.jinja_env.from_string(upload_html).render(error='<p class="error">No file selected. Please choose a file.</p>')
+            excel_file = request.files.get('excel_file')
+            pricing_file = request.files.get('pricing_file')
+            if not excel_file:
+                logger.error("No Excel file provided")
+                return app.jinja_env.from_string(upload_html).render(error='<p class="error">No Excel file selected. Please choose a file.</p>')
             
-            if not file.filename.endswith('.xlsx'):
-                logger.error(f"Invalid file extension: {file.filename}")
+            if not excel_file.filename.endswith('.xlsx'):
+                logger.error(f"Invalid Excel file extension: {excel_file.filename}")
                 return app.jinja_env.from_string(upload_html).render(error='<p class="error">Please upload a valid .xlsx file.</p>')
             
-            # Generate a unique filename with timestamp
+            # Save Excel file
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            sanitized_filename = sanitize_filename(file.filename)
+            sanitized_filename = sanitize_filename(excel_file.filename)
             file_path = os.path.join(UPLOAD_FOLDER, f"{timestamp}_{sanitized_filename}")
             file_path = os.path.normpath(file_path)
-            logger.debug(f"Saving file to: {file_path}")
+            logger.debug(f"Saving Excel file to: {file_path}")
             
-            # Check write permissions
             if not os.access(UPLOAD_FOLDER, os.W_OK):
                 logger.error(f"No write permissions for Uploads folder: {UPLOAD_FOLDER}")
                 return app.jinja_env.from_string(upload_html).render(error='<p class="error">Server error: No write permissions for Uploads folder.</p>')
             
-            # Save the file
-            file.save(file_path)
+            excel_file.save(file_path)
             
-            # Verify file exists
             if not os.path.exists(file_path):
-                logger.error(f"File not found after saving: {file_path}")
-                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Failed to save file: {file.filename}. Please try again.</p>')
+                logger.error(f"Excel file not found after saving: {file_path}")
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Failed to save file: {excel_file.filename}. Please try again.</p>')
             
-            # Log file permissions
             file_stats = os.stat(file_path)
             logger.debug(f"File permissions for {file_path}: {oct(file_stats.st_mode)[-3:]}")
             
-            # Validate file structure
+            # Validate Excel file
             logger.debug(f"Validating Excel file: {file_path}")
             wb = openpyxl.load_workbook(file_path)
             sheet_names = wb.sheetnames
             logger.debug(f"Sheet names: {sheet_names}")
             if 'SalesbyItemBASEPRICEDECON' not in sheet_names:
-                logger.error(f"Sheet 'SalesbyItemBASEPRICEDECON' not found in {file_path}")
+                logger.error(f"Sheet 'SalesbyItemBASEPRICEDECON' not found")
                 try:
                     os.remove(file_path)
                     logger.debug(f"Removed invalid file: {file_path}")
                 except Exception as e:
                     logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
-                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Sheet "SalesbyItemBASEPRICEDECON" not found in {file.filename}. Available sheets: {", ".join(sheet_names)}</p>')
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Sheet "SalesbyItemBASEPRICEDECON" not found in {excel_file.filename}. Available sheets: {", ".join(sheet_names)}</p>')
             
             df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
             actual_columns = [str(col).strip().lower() for col in df.columns]
@@ -368,7 +366,7 @@ def upload_file():
             missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
             if missing_columns:
                 logger.warning(f"Missing columns in Excel file: {missing_columns}")
-                session['column_warning'] = f"Missing columns in {file.filename}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
+                session['column_warning'] = f"Missing columns in {excel_file.filename}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
             else:
                 session['column_warning'] = None
                 logger.debug("Excel file validated successfully")
@@ -377,18 +375,84 @@ def upload_file():
             session.permanent = True
             session['file_path'] = file_path
             session['upload_timestamp'] = datetime.now().isoformat()
-            session['test_key'] = 'test_value'  # Debug key
+            session['test_key'] = 'test_value'
             logger.debug(f"Session set in / route: {dict(session)}")
+            
+            # Handle pricing file if provided
+            form_data = {}
+            if pricing_file and pricing_file.filename.endswith('.txt'):
+                try:
+                    logger.debug(f"Processing pricing file: {pricing_file.filename}")
+                    pricing_file_path = os.path.join(UPLOAD_FOLDER, f"{timestamp}_{sanitize_filename(pricing_file.filename)}")
+                    pricing_file_path = os.path.normpath(pricing_file_path)
+                    pricing_file.save(pricing_file_path)
+                    
+                    if not os.path.exists(pricing_file_path):
+                        logger.error(f"Pricing file not found after saving: {pricing_file_path}")
+                        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Failed to save pricing file: {pricing_file.filename}. Please try again.</p>')
+                    
+                    with open(pricing_file_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not re.match(r'^\w+\s*.*?:\s*\d+(\.\d+)?$', line):
+                                logger.warning(f"Invalid line format in pricing file: {line}")
+                                continue
+                            key, value = [part.strip() for part in line.split(':', 1)]
+                            try:
+                                value = float(value)
+                            except ValueError:
+                                logger.warning(f"Invalid price value in pricing file for {key}: {value}")
+                                continue
+                            
+                            key = key.lower().replace('lasterstep', 'laserstep').replace('laststep', 'laserstep')
+                            if key.startswith('chem '):
+                                step = key[5:]
+                                if step == '5 or more' or step.title() in process_step_mapping["Chemetch"]:
+                                    form_data[f"Chemetch_{step if step == '5 or more' else step.title()}"] = str(value)
+                                    logger.debug(f"Set form_data[Chemetch_{step if step == '5 or more' else step.title()}]: {value}")
+                            elif key.startswith('laserstep '):
+                                step = key[10:]
+                                if step in process_step_mapping["LaserSTEP"]:
+                                    form_data[f"LaserSTEP_{step}"] = str(value)
+                                    logger.debug(f"Set form_data[LaserSTEP_{step}]: {value}")
+                                elif step in ["21-30", "31-40", "41-50", "51-60"]:
+                                    form_data[f"LaserSTEP_{step}"] = str(245)
+                                    logger.debug(f"Set form_data[LaserSTEP_{step}]: 245 (default)")
+                            elif key.startswith('mill '):
+                                step = key[5:].title()
+                                if step in process_step_mapping["Milled"]:
+                                    form_data[f"Milled_{step}"] = str(value)
+                                    logger.debug(f"Set form_data[Milled_{step}]: {value}")
+                            elif key == 'double':
+                                form_data["Milled_Double"] = str(value)
+                                logger.warning(f"Ambiguous key 'double' mapped to Milled_Double: {value}")
+                            elif key.startswith('coat '):
+                                coating = key[5:].title().replace('Bluprint', 'BluPrint')
+                                if coating in ["Advanced Nano", "Nano Wipe", "Nano Slic", "BluPrint"]:
+                                    form_data[f"Coating_{coating}"] = str(value)
+                                    logger.debug(f"Set form_data[Coating_{coating}]: {value}")
+                    
+                    try:
+                        os.remove(pricing_file_path)
+                        logger.debug(f"Removed temporary pricing file: {pricing_file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove pricing file {pricing_file_path}: {str(e)}")
+                    
+                    logger.debug(f"Form data after pricing file parsing: {form_data}")
+                
+                except Exception as e:
+                    logger.error(f"Error processing pricing file: {str(e)}")
+                    return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Error processing pricing file: {pricing_file.filename}. Please try again.</p>')
             
             return app.jinja_env.from_string(pricing_form_html).render(
                 processes=process_step_mapping.keys(),
                 process_step_mapping=process_step_mapping,
-                form_data={},
+                form_data=form_data,
                 error=None
             )
         except Exception as e:
             logger.error(f"Unexpected error during file upload: {str(e)}")
-            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Unexpected error during upload of {file.filename if file else "file"}: {str(e)}. Please try again.</p>')
+            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Unexpected error during upload: {str(e)}. Please try again.</p>')
     
     logger.debug("Rendering upload page for GET request")
     return app.jinja_env.from_string(upload_html).render(error=None)
@@ -398,7 +462,7 @@ def pricing_form():
     logger.debug(f"Session at /pricing start: {dict(session)}")
     if request.method == 'GET':
         logger.debug("Accessed /pricing via GET, redirecting to upload")
-        return app.jinja_env.from_string(upload_html).render(error='<p class="error">Please upload a file first.</p>')
+        return app.jinja_env.from_string(upload_html).render(error='<p class="error">Please upload an Excel file first.</p>')
     
     logger.debug("Processing pricing form submission")
     global pricing_rules
@@ -410,98 +474,6 @@ def pricing_form():
         "Colour": {}
     }
     
-    form_data = {}
-    
-    # Check for pricing file upload
-    pricing_file = request.files.get('pricing_file')
-    if pricing_file and pricing_file.filename.endswith('.txt'):
-        try:
-            logger.debug(f"Processing pricing file: {pricing_file.filename}")
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            sanitized_filename = sanitize_filename(pricing_file.filename)
-            pricing_file_path = os.path.join(UPLOAD_FOLDER, f"{timestamp}_{sanitized_filename}")
-            pricing_file_path = os.path.normpath(pricing_file_path)
-            logger.debug(f"Saving pricing file to: {pricing_file_path}")
-            pricing_file.save(pricing_file_path)
-            
-            if not os.path.exists(pricing_file_path):
-                logger.error(f"Pricing file not found after saving: {pricing_file_path}")
-                return app.jinja_env.from_string(pricing_form_html).render(
-                    processes=process_step_mapping.keys(),
-                    process_step_mapping=process_step_mapping,
-                    form_data=form_data,
-                    error=f'<p class="error">Failed to save pricing file: {pricing_file.filename}. Please try again.</p>'
-                )
-            
-            with open(pricing_file_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not re.match(r'^\w+\s*.*?:\s*\d+(\.\d+)?$', line):
-                        logger.warning(f"Invalid line format in pricing file: {line}")
-                        continue
-                    key, value = [part.strip() for part in line.split(':', 1)]
-                    try:
-                        value = float(value)
-                    except ValueError:
-                        logger.warning(f"Invalid price value in pricing file for {key}: {value}")
-                        continue
-                    
-                    key = key.lower().replace('lasterstep', 'laserstep').replace('laststep', 'laserstep')
-                    if key.startswith('chem '):
-                        step = key[5:]
-                        if step == '5 or more' or step.title() in process_step_mapping["Chemetch"]:
-                            form_data[f"Chemetch_{step if step == '5 or more' else step.title()}"] = str(value)
-                            logger.debug(f"Set form_data[Chemetch_{step if step == '5 or more' else step.title()}]: {value}")
-                    elif key.startswith('laserstep '):
-                        step = key[10:]
-                        if step in process_step_mapping["LaserSTEP"]:
-                            form_data[f"LaserSTEP_{step}"] = str(value)
-                            logger.debug(f"Set form_data[LaserSTEP_{step}]: {value}")
-                        elif step in ["21-30", "31-40", "41-50", "51-60"]:
-                            form_data[f"LaserSTEP_{step}"] = str(245)
-                            logger.debug(f"Set form_data[LaserSTEP_{step}]: 245 (default)")
-                    elif key.startswith('mill '):
-                        step = key[5:].title()
-                        if step in process_step_mapping["Milled"]:
-                            form_data[f"Milled_{step}"] = str(value)
-                            logger.debug(f"Set form_data[Milled_{step}]: {value}")
-                    elif key == 'double':
-                        form_data["Milled_Double"] = str(value)
-                        logger.warning(f"Ambiguous key 'double' mapped to Milled_Double: {value}")
-                    elif key.startswith('coat '):
-                        coating = key[5:].title().replace('Bluprint', 'BluPrint')
-                        if coating in ["Advanced Nano", "Nano Wipe", "Nano Slic", "BluPrint"]:
-                            form_data[f"Coating_{coating}"] = str(value)
-                            logger.debug(f"Set form_data[Coating_{coating}]: {value}")
-            
-            try:
-                os.remove(pricing_file_path)
-                logger.debug(f"Removed temporary pricing file: {pricing_file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove pricing file {pricing_file_path}: {str(e)}")
-            
-            logger.debug(f"Form data after pricing file parsing: {form_data}")
-            
-            if not session.get('file_path'):
-                logger.error("Session file_path missing after pricing file upload")
-                return app.jinja_env.from_string(upload_html).render(error='<p class="error">No Excel file path found in session. Please upload the Excel file again.</p>')
-            
-            return app.jinja_env.from_string(pricing_form_html).render(
-                processes=process_step_mapping.keys(),
-                process_step_mapping=process_step_mapping,
-                form_data=form_data,
-                error=None
-            )
-        except Exception as e:
-            logger.error(f"Error processing pricing file: {str(e)}")
-            return app.jinja_env.from_string(pricing_form_html).render(
-                processes=process_step_mapping.keys(),
-                process_step_mapping=process_step_mapping,
-                form_data=form_data,
-                error=f'<p class="error">Error processing pricing file: {pricing_file.filename}. Please try again.</p>'
-            )
-    
-    # Process form data
     try:
         form_data = {key: value for key, value in request.form.items()}
         session['form_data'] = str(form_data)[:1000]
@@ -590,7 +562,7 @@ def pricing_form():
             return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Sheet "SalesbyItemBASEPRICEDECON" not found in {os.path.basename(file_path)}. Available sheets: {", ".join(sheet_names)}</p>')
         
         df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl')
-        logger.debug(f"Excel file read successfully: {file_path}, {len(df)} rows")
+        logger.info(f"Excel file read successfully: {file_path}, {len(df)} rows")
         actual_columns = [str(col).strip().lower() for col in df.columns]
         logger.debug(f"Actual columns: {', '.join(df.columns)}")
         required_columns = ['Sales Price', 'Frame', 'Customer/Project: Company Name', 'Process', 'Step Process', 'Coating', 'Foil Material', 'Foil Thickness', 'Colour']
@@ -673,7 +645,7 @@ def pricing_form():
         
         try:
             result_df = pd.DataFrame(results)
-            logger.debug(f"Processed {len(result_df)} rows before duplicate removal")
+            logger.info(f"Processed {len(result_df)} rows before duplicate removal")
             if result_df.empty:
                 logger.error("DataFrame is empty after processing")
                 try:
@@ -694,7 +666,7 @@ def pricing_form():
                 return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">All Base_Cost values are invalid in {os.path.basename(file_path)}. Please check Sales Price data.</p>')
             material_columns = ['Customer', 'Process', 'Step_Process', 'Coating', 'Foil_Material', 'Foil_Thickness', 'Colour']
             result_df = result_df.loc[result_df.groupby(material_columns)['Base_Cost'].idxmin()].reset_index(drop=True)
-            logger.debug(f"After duplicate removal: {len(result_df)} unique combinations")
+            logger.info(f"After duplicate removal: {len(result_df)} unique combinations")
         except Exception as e:
             logger.error(f"Error processing results: {str(e)}")
             try:
@@ -714,7 +686,7 @@ def pricing_form():
                              labels={'Base_Cost': 'Base Cost ($)', 'Customer': 'Customer'})
                 fig.update_layout(xaxis_tickangle=45)
                 chart_html = pio.to_html(fig, full_html=False)
-                logger.debug("Bar chart generated successfully")
+                logger.info("Bar chart generated successfully")
         except Exception as e:
             logger.error(f"Error generating chart: {str(e)}")
             chart_html = f'<p class="error">Error generating chart: {str(e)}</p>'
@@ -724,7 +696,7 @@ def pricing_form():
         try:
             result_df.to_csv(csv_path, index=False)
             result_df.to_excel(excel_path, index=False, engine='openpyxl')
-            logger.debug(f"Results saved to {csv_path} and {excel_path}")
+            logger.info(f"Results saved to {csv_path} and {excel_path}")
         except Exception as e:
             logger.error(f"Error saving results: {str(e)}")
             try:
@@ -742,14 +714,14 @@ def pricing_form():
         
         column_warning = session.get('column_warning')
         if column_warning:
-            logger.debug(f"Rendering results with warning: {column_warning}")
+            logger.info(f"Rendering results with warning: {column_warning}")
             return app.jinja_env.from_string(results_html).render(
                 data=result_df.to_dict('records'),
                 chart=chart_html,
                 error=f'<p class="error">Warning: {column_warning}</p>'
             )
         
-        logger.debug("Rendering results page")
+        logger.info("Rendering results page")
         return app.jinja_env.from_string(results_html).render(data=result_df.to_dict('records'), chart=chart_html)
     except Exception as e:
         logger.error(f"Error processing Excel file: {str(e)}")
