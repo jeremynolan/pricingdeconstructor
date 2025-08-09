@@ -1,5 +1,5 @@
 from flask import Flask, request, make_response, session
-from flask_session import Session  # Add flask-session for server-side sessions
+from flask_session import Session
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
@@ -12,19 +12,20 @@ import string
 import secrets
 import redis
 from urllib.parse import urlparse
+# import boto3  # Uncomment for S3 support
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(16))  # Use env var for Heroku
-app.config['SESSION_TYPE'] = 'redis'  # Default to Redis for session storage
-app.config['SESSION_PERMANENT'] = True  # Make sessions permanent
-app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours for longer sessions
-app.config['SESSION_COOKIE_HTTPONLY'] = True  # Enhance session security
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Prevent CSRF
+app.secret_key = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(16))
+app.config['SESSION_TYPE'] = 'redis'
+app.config['SESSION_PERMANENT'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = False  # Debugging: Set to True in production
-UPLOAD_FOLDER = '/tmp/Uploads'  # Use /tmp for Heroku's ephemeral filesystem
+UPLOAD_FOLDER = '/tmp/Uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Initialize Redis with TLS support for Heroku
+# Initialize Redis with TLS support
 try:
     redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
     url = urlparse(redis_url)
@@ -33,7 +34,7 @@ try:
         port=url.port,
         password=url.password if url.password else None,
         ssl=(url.scheme == 'rediss'),
-        ssl_cert_reqs=None,  # Disable certificate verification for Heroku
+        ssl_cert_reqs=None,
         decode_responses=True
     )
     redis_client.ping()
@@ -47,11 +48,11 @@ except redis.ConnectionError as e:
     os.makedirs('/tmp/flask_session', exist_ok=True)
     Session(app)
 
-# Set up logging (reduced to INFO to prevent L11 buffer overflow)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Logging: WARNING for non-critical, INFO for key operations, DEBUG for session/Redis
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Store pricing rules in memory
+# Pricing rules
 pricing_rules = {
     "Process": {},
     "Coating": {},
@@ -60,7 +61,7 @@ pricing_rules = {
     "Colour": {}
 }
 
-# Process and Step Process coupling
+# Process and Step Process mapping
 process_step_mapping = {
     "Chemetch": ["Single", "Double", "Triple", "5 or more"],
     "LaserSTEP": ["1-2", "1-5", "1-10", "1-15", "1-20", "21-30", "31-40", "41-50", "51-60"],
@@ -124,7 +125,7 @@ upload_html = """
 </html>
 """
 
-# Pricing form HTML
+# Pricing form HTML (includes Excel re-upload)
 pricing_form_html = """
 <!DOCTYPE html>
 <html>
@@ -137,6 +138,10 @@ pricing_form_html = """
         <p>Enter prices manually or use uploaded pricing file values.</p>
         {{error|safe}}
         <form method="post" action="/pricing" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="excel_file">Re-upload Excel File (.xlsx):</label>
+                <input type="file" id="excel_file" name="excel_file" accept=".xlsx" required>
+            </div>
             <h3>Process and Step Process</h3>
             {% for process in processes %}
             <div class="form-group">
@@ -302,7 +307,6 @@ def debug_info():
     )
 
 def sanitize_filename(filename):
-    """Sanitize filename by removing or replacing problematic characters."""
     valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
     sanitized = ''.join(c if c in valid_chars else '_' for c in filename)
     sanitized = re.sub(r'_+', '_', sanitized)
@@ -365,7 +369,6 @@ def upload_file():
             required_columns_normalized = [col.strip().lower() for col in required_columns]
             missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
             if missing_columns:
-                logger.warning(f"Missing columns in Excel file: {missing_columns}")
                 session['column_warning'] = f"Missing columns in {excel_file.filename}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
             else:
                 session['column_warning'] = None
@@ -395,14 +398,12 @@ def upload_file():
                         for line in f:
                             line = line.strip()
                             if not re.match(r'^\w+\s*.*?:\s*\d+(\.\d+)?$', line):
-                                logger.warning(f"Invalid line format in pricing file: {line}")
-                                continue
+                                continue  # Suppress warning logs
                             key, value = [part.strip() for part in line.split(':', 1)]
                             try:
                                 value = float(value)
                             except ValueError:
-                                logger.warning(f"Invalid price value in pricing file for {key}: {value}")
-                                continue
+                                continue  # Suppress warning logs
                             
                             key = key.lower().replace('lasterstep', 'laserstep').replace('laststep', 'laserstep')
                             if key.startswith('chem '):
@@ -425,7 +426,7 @@ def upload_file():
                                     logger.debug(f"Set form_data[Milled_{step}]: {value}")
                             elif key == 'double':
                                 form_data["Milled_Double"] = str(value)
-                                logger.warning(f"Ambiguous key 'double' mapped to Milled_Double: {value}")
+                                logger.debug(f"Set form_data[Milled_Double]: {value}")
                             elif key.startswith('coat '):
                                 coating = key[5:].title().replace('Bluprint', 'BluPrint')
                                 if coating in ["Advanced Nano", "Nano Wipe", "Nano Slic", "BluPrint"]:
@@ -475,6 +476,53 @@ def pricing_form():
     }
     
     try:
+        excel_file = request.files.get('excel_file')
+        if not excel_file:
+            logger.error("No Excel file re-uploaded in pricing form")
+            return app.jinja_env.from_string(pricing_form_html).render(
+                processes=process_step_mapping.keys(),
+                process_step_mapping=process_step_mapping,
+                form_data={},
+                error='<p class="error">Please re-upload the Excel file.</p>'
+            )
+        
+        if not excel_file.filename.endswith('.xlsx'):
+            logger.error(f"Invalid Excel file extension: {excel_file.filename}")
+            return app.jinja_env.from_string(pricing_form_html).render(
+                processes=process_step_mapping.keys(),
+                process_step_mapping=process_step_mapping,
+                form_data={},
+                error='<p class="error">Please upload a valid .xlsx file.</p>'
+            )
+        
+        # Save re-uploaded Excel file
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        sanitized_filename = sanitize_filename(excel_file.filename)
+        file_path = os.path.join(UPLOAD_FOLDER, f"{timestamp}_{sanitized_filename}")
+        file_path = os.path.normpath(file_path)
+        logger.debug(f"Saving re-uploaded Excel file to: {file_path}")
+        
+        if not os.access(UPLOAD_FOLDER, os.W_OK):
+            logger.error(f"No write permissions for Uploads folder: {UPLOAD_FOLDER}")
+            return app.jinja_env.from_string(pricing_form_html).render(
+                processes=process_step_mapping.keys(),
+                process_step_mapping=process_step_mapping,
+                form_data={},
+                error='<p class="error">Server error: No write permissions for Uploads folder.</p>'
+            )
+        
+        excel_file.save(file_path)
+        
+        if not os.path.exists(file_path):
+            logger.error(f"Excel file not found after saving: {file_path}")
+            return app.jinja_env.from_string(pricing_form_html).render(
+                processes=process_step_mapping.keys(),
+                process_step_mapping=process_step_mapping,
+                form_data={},
+                error=f'<p class="error">Failed to save Excel file: {excel_file.filename}. Please try again.</p>'
+            )
+        
+        # Process form data
         form_data = {key: value for key, value in request.form.items()}
         session['form_data'] = str(form_data)[:1000]
         logger.debug(f"Form data received: {form_data}")
@@ -493,7 +541,6 @@ def pricing_form():
                         non_zero_prices = True
                     logger.debug(f"Set price for {process}_{step}: {cost_value}")
                 except ValueError:
-                    logger.warning(f"Invalid cost value for {process}_{step}: {cost}")
                     pricing_rules["Process"][process][step] = 0
         
         for coating in ["Advanced Nano", "Nano Wipe", "Nano Slic", "BluPrint"]:
@@ -505,7 +552,6 @@ def pricing_form():
                     non_zero_prices = True
                 logger.debug(f"Set price for Coating_{coating}: {cost_value}")
             except ValueError:
-                logger.warning(f"Invalid cost value for Coating_{coating}: {cost}")
                 pricing_rules["Coating"][coating] = 0
         
         logger.debug(f"Final pricing_rules: {pricing_rules}")
@@ -519,7 +565,7 @@ def pricing_form():
                 error='<p class="error">Please provide at least one non-zero pricing rule.</p>'
             )
     except Exception as e:
-        logger.error(f"Error processing form data: {str(e)}")
+        logger.error(f"Error processing pricing form: {str(e)}")
         return app.jinja_env.from_string(pricing_form_html).render(
             processes=process_step_mapping.keys(),
             process_step_mapping=process_step_mapping,
@@ -528,27 +574,22 @@ def pricing_form():
         )
     
     # Process Excel file
-    file_path = session.get('file_path')
-    logger.debug(f"Checking session file_path: {file_path}")
-    if not file_path:
-        logger.error("No file path found in session")
-        return app.jinja_env.from_string(upload_html).render(error='<p class="error">No Excel file path found in session. Please upload the Excel file again.</p>')
-    if not os.path.exists(file_path):
-        logger.error(f"File does not exist on disk: {file_path}")
-        session.pop('file_path', None)
-        return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Uploaded Excel file not found: {os.path.basename(file_path)}. Please upload again.</p>')
+    logger.debug(f"Validating re-uploaded file: {file_path}")
+    if not os.access(file_path, os.R_OK):
+        logger.error(f"No read permissions for file: {file_path}")
+        try:
+            os.remove(file_path)
+            logger.debug(f"Removed invalid file: {file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
+        return app.jinja_env.from_string(pricing_form_html).render(
+            processes=process_step_mapping.keys(),
+            process_step_mapping=process_step_mapping,
+            form_data=form_data,
+            error=f'<p class="error">No read permissions for file: {os.path.basename(file_path)}. Please upload again.</p>'
+        )
     
     try:
-        logger.debug(f"Validating file: {file_path}")
-        if not os.access(file_path, os.R_OK):
-            logger.error(f"No read permissions for file: {file_path}")
-            try:
-                os.remove(file_path)
-                logger.debug(f"Removed invalid file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
-            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">No read permissions for file: {os.path.basename(file_path)}. Please upload again.</p>')
-        
         wb = openpyxl.load_workbook(file_path)
         sheet_names = wb.sheetnames
         logger.debug(f"Sheet names: {sheet_names}")
@@ -561,79 +602,63 @@ def pricing_form():
                 logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
             return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Sheet "SalesbyItemBASEPRICEDECON" not found in {os.path.basename(file_path)}. Available sheets: {", ".join(sheet_names)}</p>')
         
-        df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl')
-        logger.info(f"Excel file read successfully: {file_path}, {len(df)} rows")
-        actual_columns = [str(col).strip().lower() for col in df.columns]
-        logger.debug(f"Actual columns: {', '.join(df.columns)}")
-        required_columns = ['Sales Price', 'Frame', 'Customer/Project: Company Name', 'Process', 'Step Process', 'Coating', 'Foil Material', 'Foil Thickness', 'Colour']
-        required_columns_normalized = [col.strip().lower() for col in required_columns]
-        missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
-        if missing_columns:
-            logger.warning(f"Missing columns in Excel file: {missing_columns}")
-            session['column_warning'] = f"Missing columns in {os.path.basename(file_path)}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
-        else:
-            session['column_warning'] = None
-            logger.debug("Excel file validated successfully")
-        
+        # Process Excel in chunks for large files
         results = []
-        for index, row in df.iterrows():
-            try:
-                if pd.isna(row['Sales Price']) or pd.isna(row['Frame']) or pd.isna(row['Customer/Project: Company Name']):
-                    logger.debug(f"Skipping row {index} due to missing required fields")
-                    continue
-                
-                process = str(row['Process']).strip() if not pd.isna(row['Process']) else 'Unknown'
-                step_process = str(row['Step Process']).strip() if not pd.isna(row['Step Process']) else 'None'
-                if process == 'LaserSTEP':
-                    step_process = re.sub(r'\s*-\s*', '-', step_process)
-                    logger.debug(f"Normalized step_process for LaserSTEP: {step_process}")
-                coating = str(row['Coating']).strip() if not pd.isna(row['Coating']) else 'None'
-                foil_material = str(row['Foil Material']).strip() if not pd.isna(row['Foil Material']) else 'Unknown'
-                foil_thickness = str(row['Foil Thickness']).strip() if not pd.isna(row['Foil Thickness']) else 'Unknown'
-                colour = str(row['Colour']).strip() if not pd.isna(row['Colour']) else 'Unknown'
-                customer = str(row['Customer/Project: Company Name']).strip() if not pd.isna(row['Customer/Project: Company Name']) else 'Unknown'
-                
+        chunk_size = 1000  # Adjust based on dyno memory
+        for chunk in pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', chunksize=chunk_size):
+            logger.info(f"Processing chunk with {len(chunk)} rows")
+            for index, row in chunk.iterrows():
                 try:
-                    sales_price = float(row['Sales Price'])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid Sales Price in row {index}: {row['Sales Price']}")
+                    if pd.isna(row['Sales Price']) or pd.isna(row['Frame']) or pd.isna(row['Customer/Project: Company Name']):
+                        logger.debug(f"Skipping row {index} due to missing required fields")
+                        continue
+                    
+                    process = str(row['Process']).strip() if not pd.isna(row['Process']) else 'Unknown'
+                    step_process = str(row['Step Process']).strip() if not pd.isna(row['Step Process']) else 'None'
+                    if process == 'LaserSTEP':
+                        step_process = re.sub(r'\s*-\s*', '-', step_process)
+                        logger.debug(f"Normalized step_process for LaserSTEP: {step_process}")
+                    coating = str(row['Coating']).strip() if not pd.isna(row['Coating']) else 'None'
+                    foil_material = str(row['Foil Material']).strip() if not pd.isna(row['Foil Material']) else 'Unknown'
+                    foil_thickness = str(row['Foil Thickness']).strip() if not pd.isna(row['Foil Thickness']) else 'Unknown'
+                    colour = str(row['Colour']).strip() if not pd.isna(row['Colour']) else 'Unknown'
+                    customer = str(row['Customer/Project: Company Name']).strip() if not pd.isna(row['Customer/Project: Company Name']) else 'Unknown'
+                    
+                    try:
+                        sales_price = float(row['Sales Price'])
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    attribute_cost = 0
+                    if process != 'LaserCut':
+                        if process in pricing_rules["Process"]:
+                            logger.debug(f"Available steps for {process}: {list(pricing_rules['Process'][process].keys())}")
+                            if step_process in pricing_rules["Process"][process]:
+                                attribute_cost += pricing_rules["Process"][process][step_process]
+                                logger.debug(f"Applied process cost: {process}_{step_process} = {pricing_rules['Process'][process][step_process]}")
+                        if coating in pricing_rules["Coating"]:
+                            attribute_cost += pricing_rules["Coating"][coating]
+                            logger.debug(f"Applied coating cost: Coating_{coating} = {pricing_rules['Coating'][coating]}")
+                    
+                    base_cost = sales_price - attribute_cost
+                    
+                    results.append({
+                        'Customer': customer,
+                        'Frame': str(row['Frame']).strip(),
+                        'Sales_Price': sales_price,
+                        'Process': process,
+                        'Step_Process': step_process,
+                        'Coating': coating,
+                        'Foil_Material': foil_material,
+                        'Foil_Thickness': foil_thickness,
+                        'Colour': colour,
+                        'Attribute_Cost': attribute_cost,
+                        'Base_Cost': base_cost
+                    })
+                except Exception as e:
+                    logger.warning(f"Error processing row {index}: {str(e)}")
                     continue
-                
-                attribute_cost = 0
-                if process != 'LaserCut':
-                    if process in pricing_rules["Process"]:
-                        logger.debug(f"Available steps for {process}: {list(pricing_rules['Process'][process].keys())}")
-                        if step_process in pricing_rules["Process"][process]:
-                            attribute_cost += pricing_rules["Process"][process][step_process]
-                            logger.debug(f"Applied process cost: {process}_{step_process} = {pricing_rules['Process'][process][step_process]}")
-                        else:
-                            logger.warning(f"Invalid step_process in row {index}: {step_process} for process {process}")
-                    else:
-                        logger.warning(f"Invalid process in row {index}: {process}")
-                    if coating in pricing_rules["Coating"]:
-                        attribute_cost += pricing_rules["Coating"][coating]
-                        logger.debug(f"Applied coating cost: Coating_{coating} = {pricing_rules['Coating'][coating]}")
-                    else:
-                        logger.warning(f"Invalid coating in row {index}: {coating}")
-                
-                base_cost = sales_price - attribute_cost
-                
-                results.append({
-                    'Customer': customer,
-                    'Frame': str(row['Frame']).strip(),
-                    'Sales_Price': sales_price,
-                    'Process': process,
-                    'Step_Process': step_process,
-                    'Coating': coating,
-                    'Foil_Material': foil_material,
-                    'Foil_Thickness': foil_thickness,
-                    'Colour': colour,
-                    'Attribute_Cost': attribute_cost,
-                    'Base_Cost': base_cost
-                })
-            except Exception as e:
-                logger.warning(f"Error processing row {index}: {str(e)}")
-                continue
+        
         if not results:
             logger.error("No valid data processed from Excel file")
             try:
