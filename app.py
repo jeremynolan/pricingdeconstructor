@@ -34,7 +34,7 @@ pricing_rules = {
 # Process and Step Process coupling
 process_step_mapping = {
     "Chemetch": ["Single", "Double", "Triple", "5 or more"],
-    "LaserSTEP": ["1-2", "1-5", "1-10", "1-15", "1-20", "21-30", "31-40", "41-50", "51-60"],  # Added new ranges
+    "LaserSTEP": ["1-2", "1-5", "1-10", "1-15", "1-20", "21-30", "31-40", "41-50", "51-60"],
     "Milled": ["Single", "Double", "Triple", "Quad"],
     "LaserCut": []
 }
@@ -143,7 +143,7 @@ results_html = """
 <body>
     <div class="container">
         <h1>Deconstructed Pricing</h1>
-        <p>{{data|length}} Unique Customer-Material Combinations Processed</p>
+        <p>{{data|length}} Unique Customer-Material-Price Combinations Processed</p>
         {{error|safe}}
         <a href="/download" class="download">Download Results as CSV</a>
         <a href="/download_excel" class="download download-excel">Download Results as Excel</a>
@@ -153,7 +153,9 @@ results_html = """
             <thead>
                 <tr>
                     <th>Customer</th>
+                    <th>Customer Internal ID</th>
                     <th>Frame</th>
+                    <th>Item Internal ID</th>
                     <th>Sales Price</th>
                     <th>Process</th>
                     <th>Step Process</th>
@@ -169,7 +171,9 @@ results_html = """
                 {% for row in data %}
                 <tr>
                     <td>{{row.Customer}}</td>
+                    <td>{{row.Customer_Internal_ID}}</td>
                     <td>{{row.Frame}}</td>
+                    <td>{{row.Item_Internal_ID}}</td>
                     <td>{{row.Sales_Price}}</td>
                     <td>{{row.Process}}</td>
                     <td>{{row.Step_Process}}</td>
@@ -288,7 +292,7 @@ def upload_file():
             # Verify file exists after saving
             if not os.path.exists(file_path):
                 logger.error(f"File not found after saving: {file_path}")
-                return app.jinja_env.from_string(upload_html).render(error='<p class="error">Failed to save file: {file.filename}. Please check disk space or permissions and try again.</p>')
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Failed to save file: {file.filename}. Please check disk space or permissions and try again.</p>')
             
             # Log file permissions
             file_stats = os.stat(file_path)
@@ -311,12 +315,26 @@ def upload_file():
             df = pd.read_excel(file_path, sheet_name='SalesbyItemBASEPRICEDECON', engine='openpyxl', nrows=1)
             actual_columns = [str(col).strip().lower() for col in df.columns]
             logger.debug(f"Actual columns: {', '.join(df.columns)}")
-            required_columns = ['Sales Price', 'Frame', 'Customer/Project: Company Name', 'Process', 'Step Process', 'Coating', 'Foil Material', 'Foil Thickness', 'Colour']
+            required_columns = [
+                'Sales Price', 'Frame', 'Customer/Project: Company Name',
+                'Process', '[ES] Step Process', 'Coating', 'Foil Material',
+                'Foil Thickness', 'Colour'
+            ]
+            optional_columns = ['Customer/Project: Internal ID', 'Item: Internal ID']
             required_columns_normalized = [col.strip().lower() for col in required_columns]
-            missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
-            if missing_columns:
-                logger.warning(f"Missing columns in Excel file: {missing_columns}. Proceeding with warning.")
-                session['column_warning'] = f"Missing columns in {file.filename}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
+            missing_required_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
+            missing_optional_columns = [col for col in optional_columns if col.strip().lower() not in actual_columns]
+            if missing_required_columns:
+                logger.warning(f"Missing required columns in Excel file: {missing_required_columns}. Cannot proceed.")
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Removed invalid file: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Missing required columns in {file.filename}: {", ".join(missing_required_columns)}. Found: {", ".join(df.columns)}</p>')
+            if missing_optional_columns:
+                logger.warning(f"Missing optional columns in Excel file: {missing_optional_columns}. Proceeding with warning.")
+                session['column_warning'] = f"Missing optional columns in {file.filename}: {', '.join(missing_optional_columns)}. Found: {', '.join(df.columns)}"
             else:
                 session['column_warning'] = None
                 logger.debug("Excel file validated successfully")
@@ -555,38 +573,64 @@ def pricing_form():
         logger.debug(f"Excel file read successfully: {file_path}, {len(df)} rows")
         actual_columns = [str(col).strip().lower() for col in df.columns]
         logger.debug(f"Actual columns: {', '.join(df.columns)}")
-        required_columns = ['Sales Price', 'Frame', 'Customer/Project: Company Name', 'Process', 'Step Process', 'Coating', 'Foil Material', 'Foil Thickness', 'Colour']
+        required_columns = [
+            'Sales Price', 'Frame', 'Customer/Project: Company Name',
+            'Process', '[ES] Step Process', 'Coating', 'Foil Material',
+            'Foil Thickness', 'Colour'
+        ]
+        optional_columns = ['Customer/Project: Internal ID', 'Item: Internal ID']
         required_columns_normalized = [col.strip().lower() for col in required_columns]
-        missing_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
-        if missing_columns:
-            logger.warning(f"Missing columns in Excel file: {missing_columns}. Proceeding with warning.")
-            session['column_warning'] = f"Missing columns in {os.path.basename(file_path)}: {', '.join(missing_columns)}. Found: {', '.join(df.columns)}"
+        missing_required_columns = [col for col in required_columns if col.strip().lower() not in actual_columns]
+        missing_optional_columns = [col for col in optional_columns if col.strip().lower() not in actual_columns]
+        if missing_required_columns:
+            logger.error(f"Missing required columns in Excel file: {missing_required_columns}")
+            try:
+                os.remove(file_path)
+                logger.debug(f"Removed invalid file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
+            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Missing required columns in {os.path.basename(file_path)}: {", ".join(missing_required_columns)}. Found: {", ".join(df.columns)}</p>')
+        if missing_optional_columns:
+            logger.warning(f"Missing optional columns in Excel file: {missing_optional_columns}. Proceeding with warning.")
+            session['column_warning'] = f"Missing optional columns in {os.path.basename(file_path)}: {', '.join(missing_optional_columns)}. Found: {', '.join(df.columns)}"
         else:
             session['column_warning'] = None
             logger.debug("Excel file validated successfully")
         
         results = []
+        skipped_rows = []
         for index, row in df.iterrows():
             try:
-                if pd.isna(row['Sales Price']) or pd.isna(row['Frame']) or pd.isna(row['Customer/Project: Company Name']):
-                    logger.debug(f"Skipping row {index} due to missing required fields")
+                # Check for missing required fields
+                missing_fields = []
+                if pd.isna(row['Sales Price']):
+                    missing_fields.append('Sales Price')
+                if pd.isna(row['Frame']):
+                    missing_fields.append('Frame')
+                if pd.isna(row['Customer/Project: Company Name']):
+                    missing_fields.append('Customer/Project: Company Name')
+                if missing_fields:
+                    skipped_rows.append((index, f"Missing required fields: {', '.join(missing_fields)}"))
+                    logger.debug(f"Skipping row {index} due to missing required fields: {', '.join(missing_fields)}")
                     continue
                 
                 process = str(row['Process']).strip() if not pd.isna(row['Process']) else 'Unknown'
-                step_process = str(row['Step Process']).strip() if not pd.isna(row['Step Process']) else 'None'
-                # Normalize step_process for LaserSTEP to match hyphenated format
+                step_process = str(row['[ES] Step Process']).strip() if not pd.isna(row['[ES] Step Process']) else 'None'
                 if process == 'LaserSTEP':
-                    step_process = re.sub(r'\s*-\s*', '-', step_process)  # Replace any spaces around hyphen with single hyphen
+                    step_process = re.sub(r'\s*-\s*', '-', step_process)
                     logger.debug(f"Normalized step_process for LaserSTEP: {step_process}")
                 coating = str(row['Coating']).strip() if not pd.isna(row['Coating']) else 'None'
                 foil_material = str(row['Foil Material']).strip() if not pd.isna(row['Foil Material']) else 'Unknown'
                 foil_thickness = str(row['Foil Thickness']).strip() if not pd.isna(row['Foil Thickness']) else 'Unknown'
                 colour = str(row['Colour']).strip() if not pd.isna(row['Colour']) else 'Unknown'
                 customer = str(row['Customer/Project: Company Name']).strip() if not pd.isna(row['Customer/Project: Company Name']) else 'Unknown'
+                customer_internal_id = str(row.get('Customer/Project: Internal ID', 'Unknown')).strip()
+                item_internal_id = str(row.get('Item: Internal ID', 'Unknown')).strip()
                 
                 try:
                     sales_price = float(row['Sales Price'])
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    skipped_rows.append((index, f"Invalid Sales Price: {row['Sales Price']}"))
                     logger.warning(f"Invalid Sales Price in row {index}: {row['Sales Price']}")
                     continue
                 
@@ -611,7 +655,9 @@ def pricing_form():
                 
                 results.append({
                     'Customer': customer,
+                    'Customer_Internal_ID': customer_internal_id,
                     'Frame': str(row['Frame']).strip(),
+                    'Item_Internal_ID': item_internal_id,
                     'Sales_Price': sales_price,
                     'Process': process,
                     'Step_Process': step_process,
@@ -623,18 +669,25 @@ def pricing_form():
                     'Base_Cost': base_cost
                 })
             except Exception as e:
+                skipped_rows.append((index, f"Error processing row: {str(e)}"))
                 logger.warning(f"Error processing row {index}: {str(e)}")
                 continue
+        
         if not results:
-            logger.error("No valid data processed from Excel file")
+            logger.error(f"No valid data processed from Excel file. Skipped {len(skipped_rows)} rows.")
+            error_message = f'<p class="error">No valid data found in Excel file {os.path.basename(file_path)}. Reasons for skipping rows:<br>'
+            error_message += '<ul>' + ''.join(f'<li>Row {row_idx}: {reason}</li>' for row_idx, reason in skipped_rows[:10]) + '</ul>'
+            if len(skipped_rows) > 10:
+                error_message += f'<p>And {len(skipped_rows) - 10} more rows skipped. Check the debug log for details.</p>'
+            error_message += '<p>Please check the file contents (e.g., ensure Sales Price, Frame, and Customer/Project: Company Name are populated).</p>'
             try:
                 os.remove(file_path)
                 logger.debug(f"Removed invalid file: {file_path}")
             except Exception as e:
                 logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
-            return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">No valid data found in Excel file {os.path.basename(file_path)}. Please check the file contents (e.g., ensure Sales Price, Frame, and Customer/Project: Company Name are populated).</p>')
+            return app.jinja_env.from_string(upload_html).render(error=error_message)
         
-        # Remove duplicates by customer and material combination, keeping row with lowest Base Cost
+        # Remove duplicates by customer, material, and sales price combination
         try:
             result_df = pd.DataFrame(results)
             logger.debug(f"Processed {len(result_df)} rows before duplicate removal")
@@ -646,8 +699,8 @@ def pricing_form():
                 except Exception as e:
                     logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
                 return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">No valid data after processing {os.path.basename(file_path)}. Please check the file contents.</p>')
-            # Ensure Customer and Base_Cost are valid
-            if 'Customer' not in result_df.columns or 'Base_Cost' not in result_df.columns:
+            # Ensure Customer and Sales_Price are valid
+            if 'Customer' not in result_df.columns or 'Sales_Price' not in result_df.columns:
                 logger.error(f"Missing critical columns in DataFrame: {result_df.columns}")
                 try:
                     os.remove(file_path)
@@ -655,22 +708,25 @@ def pricing_form():
                 except Exception as e:
                     logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
                 return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">Missing critical columns in {os.path.basename(file_path)}: {", ".join(result_df.columns)}</p>')
-            # Handle non-string Customers or non-numeric Base_Cost
+            # Handle non-string Customers or non-numeric Sales_Price
             result_df['Customer'] = result_df['Customer'].astype(str)
+            result_df['Customer_Internal_ID'] = result_df['Customer_Internal_ID'].astype(str)
+            result_df['Item_Internal_ID'] = result_df['Item_Internal_ID'].astype(str)
+            result_df['Sales_Price'] = pd.to_numeric(result_df['Sales_Price'], errors='coerce')
             result_df['Base_Cost'] = pd.to_numeric(result_df['Base_Cost'], errors='coerce')
-            if result_df['Base_Cost'].isna().all():
-                logger.error("All Base_Cost values are invalid")
+            if result_df['Sales_Price'].isna().all():
+                logger.error("All Sales_Price values are invalid")
                 try:
                     os.remove(file_path)
                     logger.debug(f"Removed invalid file: {file_path}")
                 except Exception as e:
                     logger.warning(f"Failed to remove invalid file {file_path}: {str(e)}")
-                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">All Base_Cost values are invalid in {os.path.basename(file_path)}. Please check Sales Price data.</p>')
-            # Define material columns for deduplication
-            material_columns = ['Customer', 'Process', 'Step_Process', 'Coating', 'Foil_Material', 'Foil_Thickness', 'Colour']
-            # Group by customer and material attributes, keep row with minimum Base_Cost
-            result_df = result_df.loc[result_df.groupby(material_columns)['Base_Cost'].idxmin()].reset_index(drop=True)
-            logger.debug(f"After duplicate removal: {len(result_df)} unique customer-material combinations")
+                return app.jinja_env.from_string(upload_html).render(error=f'<p class="error">All Sales_Price values are invalid in {os.path.basename(file_path)}. Please check Sales Price data.</p>')
+            # Define columns for deduplication
+            dedup_columns = ['Customer', 'Process', 'Step_Process', 'Coating', 'Foil_Material', 'Foil_Thickness', 'Colour', 'Sales_Price']
+            # Remove exact duplicates based on customer, material attributes, and sales price
+            result_df = result_df.drop_duplicates(subset=dedup_columns, keep='first').reset_index(drop=True)
+            logger.debug(f"After duplicate removal: {len(result_df)} unique customer-material-price combinations")
         except Exception as e:
             logger.error(f"Error processing results: {str(e)}")
             try:
@@ -686,7 +742,9 @@ def pricing_form():
                 logger.error("DataFrame is empty for chart generation")
                 chart_html = '<p class="error">No data available for chart</p>'
             else:
-                fig = px.bar(result_df, x='Customer', y='Base_Cost', title='Lowest Base Cost by Customer',
+                # For the chart, group by Customer and take the minimum Base_Cost
+                chart_df = result_df.loc[result_df.groupby('Customer')['Base_Cost'].idxmin()]
+                fig = px.bar(chart_df, x='Customer', y='Base_Cost', title='Lowest Base Cost by Customer',
                              labels={'Base_Cost': 'Base Cost ($)', 'Customer': 'Customer'})
                 fig.update_layout(xaxis_tickangle=45)
                 chart_html = pio.to_html(fig, full_html=False)

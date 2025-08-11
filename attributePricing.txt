@@ -11,10 +11,10 @@ laserstep 21-30:255
 laserstep 31-40:355
 laserstep 41-50: 455
 laserstep 51-60: 555
-mill single: 150
-mill double: 175
-mill triple: 225
-mill quad: 300
+mill single: 185
+mill double: 185
+mill triple: 185
+mill quad: 345
 coat advanced nano: 163
 coat nano wipe: 40
 coat nano slic: 163
